@@ -3,7 +3,7 @@ import { SorobanRpc } from "@stellar/stellar-sdk";
 import { pool } from "./db";
 import { cached } from "./cache";
 import { getLastIndexedLedger } from "./events";
-import { startTime } from "./index";
+import { startTime, INDEXED_CONTRACTS } from "./index";
 import swaggerUi from "swagger-ui-express";
 import { generateOpenApiDocument } from "./openapi";
 
@@ -155,6 +155,7 @@ interface HealthResponse {
   total_delegates_indexed: number;
   uptime_seconds: number;
   timestamp: string;
+  subscribed_contracts: string[];
 }
 
 async function getHealthStatus(server: SorobanRpc.Server): Promise<HealthResponse> {
@@ -197,6 +198,9 @@ async function getHealthStatus(server: SorobanRpc.Server): Promise<HealthRespons
     total_delegates_indexed: totalDelegates,
     uptime_seconds: uptimeSeconds,
     timestamp: new Date().toISOString(),
+    subscribed_contracts: Object.entries(INDEXED_CONTRACTS)
+      .filter(([, address]) => Boolean(address))
+      .map(([name]) => name),
   };
 }
 
@@ -275,7 +279,7 @@ export function createApp(server: SorobanRpc.Server): express.Application {
   // Swagger documentation
   app.get("/openapi.json", (_req, res) => {
     res.setHeader("Content-Type", "application/json");
-    res.send(generateOpenApiDocument());
+    res.send(generateOpenApiDocument(app));
   });
   app.use("/docs", swaggerUi.serve, swaggerUi.setup(generateOpenApiDocument()));
 
@@ -305,6 +309,42 @@ export function createApp(server: SorobanRpc.Server): express.Application {
       console.error("Stats error:", error);
       res.status(500).json({ error: "Internal server error" });
     }
+  });
+
+  app.get("/vote-escrow/locks", async (req: Request, res: Response): Promise<void> => {
+    const pagination = parsePagination(req.query.limit, req.query.offset, 20, 100);
+    if (!pagination) { res.status(400).json({ error: "Invalid pagination parameters" }); return; }
+    const { limit, offset } = pagination;
+    const withdrawn = req.query.withdrawn === undefined ? undefined : String(req.query.withdrawn) === "true";
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (withdrawn !== undefined) { params.push(withdrawn); conditions.push(`withdrawn = $${params.length}`); }
+    params.push(limit, offset);
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    try {
+      const result = await pool.query(
+        `SELECT owner_address, amount, start_ledger, end_ledger, initial_voting_power, withdrawn, updated_ledger
+         FROM vote_escrow_locks ${where} ORDER BY amount DESC OFFSET $${params.length - 1} LIMIT $${params.length}`,
+        [params[0], offset, limit].filter((value) => value !== undefined),
+      );
+      res.json({ locks: result.rows, pagination: { limit, offset, hasMore: result.rows.length === limit } });
+    } catch { res.status(500).json({ error: "Internal server error" }); }
+  });
+
+  app.get("/vote-escrow/locks/:address", async (req: Request, res: Response): Promise<void> => {
+    try {
+      const result = await pool.query("SELECT * FROM vote_escrow_locks WHERE owner_address = $1", [req.params.address]);
+      if (!result.rows[0]) { res.status(404).json({ error: "Lock not found" }); return; }
+      res.json(result.rows[0]);
+    } catch { res.status(500).json({ error: "Internal server error" }); }
+  });
+
+  app.get("/vote-escrow/stats", async (_req: Request, res: Response): Promise<void> => {
+    try {
+      const result = await pool.query(`SELECT COALESCE(SUM(amount) FILTER (WHERE withdrawn = false), 0) AS total_locked,
+        COUNT(*) FILTER (WHERE withdrawn = false)::int AS active_lock_count FROM vote_escrow_locks`);
+      res.json(result.rows[0] ?? { total_locked: "0", active_lock_count: 0 });
+    } catch { res.status(500).json({ error: "Internal server error" }); }
   });
 
   // GET /analytics/summary

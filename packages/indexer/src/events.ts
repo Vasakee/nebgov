@@ -69,6 +69,7 @@ export interface IndexerConfig {
   signalAnchorAddress?: string;
   treasuryStrategiesAddress?: string;
   optimisticGovernorAddress?: string;
+  voteEscrowAddress?: string;
   treasuryStateReader?: TreasuryStateReader;
   pollIntervalMs: number;
 }
@@ -108,6 +109,7 @@ export async function processEvents(
       contractIds.push(config.treasuryStrategiesAddress);
     if (config.optimisticGovernorAddress)
       contractIds.push(config.optimisticGovernorAddress);
+    if (config.voteEscrowAddress) contractIds.push(config.voteEscrowAddress);
 
     const response = await server.getEvents({
       startLedger,
@@ -182,6 +184,9 @@ export async function processEvents(
         contractId &&
         config.optimisticGovernorAddress &&
         contractId === config.optimisticGovernorAddress
+      );
+      const isVoteEscrow = !!(
+        contractId && config.voteEscrowAddress && contractId === config.voteEscrowAddress
       );
 
       try {
@@ -401,6 +406,8 @@ export async function processEvents(
           }
         } else if (isOptimisticGovernor) {
           await handleOptimisticGovernorEvent(event, eventType, topics);
+        } else if (isVoteEscrow) {
+          await handleVoteEscrowEvent(event, eventType, topics);
         } else {
           switch (eventType) {
             case "ProposalCreated":
@@ -1531,6 +1538,45 @@ async function handleStrategyWithdrawalClaimed(
     type: "strategy_withdrawal_claimed",
     data: { withdrawal_id: withdrawalId, actual_amount: actualAmount, ledger: event.ledger },
   });
+}
+
+async function handleVoteEscrowEvent(
+  event: SorobanRpc.Api.EventResponse,
+  eventType: string,
+  topics: unknown[],
+): Promise<void> {
+  const raw = scValToNative(event.value) as unknown;
+  const data = (raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw
+    : {}) as Record<string, unknown>;
+  const owner = String(data.owner ?? topics[1] ?? "");
+  if (!owner) return;
+
+  if (eventType === "LockWithdrawn") {
+    await pool.query(
+      "UPDATE vote_escrow_locks SET withdrawn = true, updated_ledger = $2 WHERE owner_address = $1",
+      [owner, event.ledger],
+    );
+    invalidatePattern("vote-escrow:");
+    return;
+  }
+
+  const amount = String(data.amount ?? 0);
+  const startLedger = Number(data.start_ledger ?? data.start ?? event.ledger);
+  const endLedger = Number(data.end_ledger ?? data.end ?? 0);
+  const initialVotingPower = String(
+    data.initial_voting_power ?? data.voting_power ?? amount,
+  );
+  await pool.query(
+    `INSERT INTO vote_escrow_locks
+       (owner_address, amount, start_ledger, end_ledger, initial_voting_power, withdrawn, updated_ledger)
+     VALUES ($1, $2, $3, $4, $5, false, $6)
+     ON CONFLICT (owner_address) DO UPDATE SET
+       amount = $2, end_ledger = $4, initial_voting_power = $5,
+       withdrawn = false, updated_ledger = $6`,
+    [owner, amount, startLedger, endLedger, initialVotingPower, event.ledger],
+  );
+  invalidatePattern("vote-escrow:");
 }
 
 async function handleCoSponsorshipWithdrawn(

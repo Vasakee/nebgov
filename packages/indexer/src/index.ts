@@ -1,5 +1,5 @@
 import { createServer } from "http";
-import { Networks, SorobanRpc } from "@stellar/stellar-sdk";
+import { Networks, SorobanRpc, StrKey } from "@stellar/stellar-sdk";
 import dotenv from "dotenv";
 import { initDb, pool } from "./db";
 import {
@@ -30,6 +30,7 @@ const TREASURY_STRATEGIES_ADDRESS =
   process.env.TREASURY_STRATEGIES_ADDRESS ?? "";
 const OPTIMISTIC_GOVERNOR_ADDRESS =
   process.env.OPTIMISTIC_GOVERNOR_ADDRESS ?? "";
+const VOTE_ESCROW_ADDRESS = process.env.VOTE_ESCROW_ADDRESS ?? "";
 const TREASURY_SIMULATION_ACCOUNT =
   process.env.TREASURY_SIMULATION_ACCOUNT ?? "";
 const NETWORK_PASSPHRASE =
@@ -37,6 +38,28 @@ const NETWORK_PASSPHRASE =
 const RPC_URL = process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org";
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? 5000);
 const PORT = Number(process.env.PORT ?? 3001);
+
+export const INDEXED_CONTRACTS = {
+  GOVERNOR_ADDRESS,
+  WRAPPER_ADDRESS,
+  TREASURY_ADDRESS,
+  LIQUIDITY_ADDRESS,
+  CO_SPONSORSHIP_ADDRESS,
+  PROPOSAL_BONDS_ADDRESS,
+  TOKEN_VOTES_ADDRESS,
+  TIMELOCK_ADDRESS,
+  CONVICTION_VOTING_ADDRESS,
+  SIGNAL_ANCHOR_ADDRESS,
+  TREASURY_STRATEGIES_ADDRESS,
+  OPTIMISTIC_GOVERNOR_ADDRESS,
+  VOTE_ESCROW_ADDRESS,
+};
+
+for (const [name, address] of Object.entries(INDEXED_CONTRACTS)) {
+  if (!address) console.warn(`[indexer] ${name} is not configured; contract will not be indexed`);
+  else if (!StrKey.isValidContract(address))
+    console.warn(`[indexer] ${name} is invalid; contract will not be indexed`);
+}
 
 // Track indexer startup time for uptime calculation
 export const startTime = Date.now();
@@ -98,6 +121,7 @@ async function runIndexer(): Promise<void> {
     signalAnchorAddress: SIGNAL_ANCHOR_ADDRESS,
     treasuryStrategiesAddress: TREASURY_STRATEGIES_ADDRESS,
     optimisticGovernorAddress: OPTIMISTIC_GOVERNOR_ADDRESS,
+    voteEscrowAddress: VOTE_ESCROW_ADDRESS,
     treasuryStateReader,
     pollIntervalMs: POLL_INTERVAL_MS,
   };
