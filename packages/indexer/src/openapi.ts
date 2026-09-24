@@ -201,10 +201,19 @@ registry.registerPath({
   },
 });
 
-export function generateOpenApiDocument() {
-  const generator = new OpenApiGeneratorV3(registry.definitions);
+export function getRegisteredGetPaths(app: { _router?: { stack?: any[] } }): string[] {
+  const paths = new Set<string>();
+  for (const layer of app._router?.stack ?? []) {
+    if (!layer.route || !layer.route.methods?.get) continue;
+    const path = String(layer.route.path);
+    if (path !== "/openapi.json" && !path.startsWith("/docs")) paths.add(path);
+  }
+  return [...paths].sort();
+}
 
-  return generator.generateDocument({
+export function generateOpenApiDocument(app?: { _router?: { stack?: any[] } }) {
+  const generator = new OpenApiGeneratorV3(registry.definitions);
+  const document = generator.generateDocument({
     openapi: '3.0.0',
     info: {
       version: '1.0.0',
@@ -213,4 +222,32 @@ export function generateOpenApiDocument() {
     },
     servers: [{ url: '/api' }],
   });
+
+  // Keep the specification representative even when a route has not yet
+  // received a dedicated Zod schema. Dedicated registrations above take
+  // precedence; these entries still expose path parameters, success, and
+  // standard error responses instead of silently omitting the route.
+  for (const route of getRegisteredGetPaths(app ?? {})) {
+    const path = route.replace(/:([A-Za-z0-9_]+)/g, '{$1}');
+    if (document.paths[path]?.get) continue;
+    const parameters = [...path.matchAll(/\{([^}]+)\}/g)].map(([_, name]) => ({
+      name,
+      in: 'path' as const,
+      required: true,
+      schema: { type: 'string' as const },
+    }));
+    document.paths[path] = {
+      get: {
+        summary: `GET ${route}`,
+        parameters,
+        responses: {
+          200: { description: 'Successful response.' },
+          400: { description: 'Invalid request.' },
+          404: { description: 'Resource not found.' },
+          500: { description: 'Internal server error.' },
+        },
+      },
+    };
+  }
+  return document;
 }
